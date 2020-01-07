@@ -2,6 +2,8 @@ package org.bom4v.ti
 
 //import org.apache.hadoop.conf.Configuration
 //import org.apache.hadoop.fs._
+import io.delta.tables._
+import org.apache.spark.sql.functions._
 
 /**
   * Simple Spark job aimed at checking that everything is working.
@@ -60,10 +62,90 @@ object DeltaLakeStorer extends App {
     .option ("inferSchema", "true")
     .option ("header", "true")
     .option ("delimiter", "^")
+
     .csv (inputCSVFile)
 
   // Dump the data-frame into Delta Lake
   df.write.format("delta").mode("overwrite").save(dlkFilepath)
+
+  // End of the Spark session
+  spark.stop()
+}
+
+// following https://docs.databricks.com/delta/delta-update.html#write-change-data-into-a-delta-table
+object DeltaLakeUpdater extends App {
+  //
+  val spark = org.apache.spark.sql.SparkSession
+    .builder()
+    .appName("DeltaLakeStorer")
+    .master("local[*]")
+    .getOrCreate()
+
+  // Display versions
+  Utilities.displayVersions (spark)
+
+  // CSV file (input)
+  val defaultCSVFile = "data/cdr_example.csv"
+
+  // Delta Lake directory (output)
+  val defaultDlkFilepath = "/tmp/delta-lake/table.dlk"
+
+  // Retrieve the expected filename of the resulting CSV file,
+  // if given as command line parameter
+  val inputCSVFile = Utilities.getCSVFilePath (defaultCSVFile, args)
+  println ("File-path for the CSV data file: " + inputCSVFile)
+
+  // Retrieve the file-path of the Delta Lake-stored data frame,
+  // if given as command line parameter
+  val dlkFilepath = Utilities.getDeltaLakeFilepath (defaultDlkFilepath, args)
+  println ("File-path for the Delta Lake table/data-frame: " + dlkFilepath)
+
+  // Read the data from the CSV file
+  val updates = spark.read
+    .option ("inferSchema", "true")
+    .option ("header", "true")
+    .option ("delimiter", "^")
+    .csv (inputCSVFile)
+
+  val deltaTable = DeltaTable.forPath(spark, dlkFilepath)
+        .as("deltaTable")
+        . merge(
+            updates.as("updates"),
+            "deltaTable.customer_id = updates.customer_id")
+        .whenNotMatched()
+        .insertAll()
+        .execute()
+
+  // End of the Spark session
+  spark.stop()
+}
+
+object DeltaLakeHistory extends App {
+  //
+  val spark = org.apache.spark.sql.SparkSession
+    .builder()
+    .appName("DeltaLakeStorer")
+    .master("local[*]")
+    .getOrCreate()
+
+  // Display versions
+  Utilities.displayVersions (spark)
+
+  // Delta Lake directory (output)
+  val defaultDlkFilepath = "/tmp/delta-lake/table.dlk"
+
+  // Retrieve the expected filename of the resulting CSV file,
+  // if given as command line parameter
+
+  // Retrieve the file-path of the Delta Lake-stored data frame,
+  // if given as command line parameter
+  val dlkFilepath = Utilities.getDeltaLakeFilepath (defaultDlkFilepath, args)
+  println ("File-path for the Delta Lake table/data-frame: " + dlkFilepath)
+
+  val deltaTable = DeltaTable.forPath(spark, dlkFilepath)
+
+  val fullHistoryDF = deltaTable.history()
+  fullHistoryDF.show()
 
   // End of the Spark session
   spark.stop()
@@ -113,7 +195,10 @@ object DeltaLakeRetriever extends App {
   // a directory with all the chunks, which then need
   // to be re-assembled thanks to HDFS utilities (here,
   // the Utilities.merge() method)
-  dfLatest.write
+  dfLatest
+    .sort("customer_id")
+    .repartition(1)
+    .write
     .format ("com.databricks.spark.csv")
     .option ("header", "true")
     .option ("delimiter", "^")
